@@ -2,3 +2,6 @@ numpy
 tqdm
 pandas
 matplotlib
+notebook
+torch
+lkh

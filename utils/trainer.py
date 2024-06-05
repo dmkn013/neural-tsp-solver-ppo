@@ -14,7 +14,7 @@ import torch.optim as optim
 class Trainer():
     def __init__(self, model, train_loader, val_loader, optimizer, cfg):
         self.model = model
-        self.save_dir = os.path.join(cfg.save_dir, cfg.run_name)
+        self.save_dir = os.path.join(cfg.save_dir, f'tsp_{cfg.n_nodes}', cfg.run_name)
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
 
@@ -78,6 +78,7 @@ class Trainer():
         losses_value = []
 
         for batch in tqdm(self.train_loader, postfix=f'{i_epoch}-th epoch processing'):
+            batch = batch.cuda()
             loss_policy, loss_value, cost = self.train_batch(batch)
             losses_policy.append(loss_policy)
             losses_value.append(loss_value)
@@ -123,6 +124,7 @@ class Trainer():
             out_old = self.model_old(batch, tour)
         log_p_old, tour_recon = out_old[0], out_old[-1]
         advantage, value_tgt = self.calc_advantage(reward, value, reward_final) # (batch, node)
+        advantage = advantage - advantage.mean(dim=1, keepdims=True)
         ratio = torch.exp(log_p-log_p_old) # (batch, node)
         ratio_clipped = torch.clamp(ratio, 1-self.epsilon, 1+self.epsilon)
         loss_policy1 = advantage * ratio
@@ -130,7 +132,6 @@ class Trainer():
         loss_policy = -torch.min(loss_policy1, loss_policy2).mean()
         mse_value = self.mse(value, value_tgt)
         loss_value = torch.sqrt(mse_value) * self.coef_value
-        print(f'{value[0]=}\n {value_tgt[0]=}\n{loss_value=}\n\n\n')
         loss = loss_policy + loss_value
         self.model_old = copy.deepcopy(self.model)
         self.optimizer.zero_grad()
@@ -144,6 +145,7 @@ class Trainer():
         start = time.time()
 
         for i_batch, batch in enumerate(self.val_loader):
+            batch = batch.cuda()
             with torch.no_grad():
                 log_p, reward, value, cost, reward_final, tour = self.model(batch)
             costs.append(cost.mean().item())
