@@ -30,6 +30,8 @@ class TSP(object):
         return StateTSP.initialize(*args, **kwargs)
 
 
+    
+    
 class TSPDataset(Dataset):
     
     def __init__(self, filename=None, size=50, num_samples=1000000, offset=0, distribution=None):

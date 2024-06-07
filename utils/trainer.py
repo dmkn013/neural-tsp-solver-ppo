@@ -68,6 +68,11 @@ class Trainer():
 
 
     def train_epoch(self, i_epoch):
+        # gamma = 0.9
+        # progression = [(gamma ** i) for i in range(self.cfg.n_nodes)]
+        # #progression.reverse()
+        # self.progression = torch.tensor(progression, dtype=torch.float32).cuda()
+
         start = time.time()
         costs = []
         self.model.train()
@@ -125,6 +130,7 @@ class Trainer():
         log_p_old, tour_recon = out_old[0], out_old[-1]
         advantage, value_tgt = self.calc_advantage(reward, value, reward_final) # (batch, node)
         advantage = advantage - advantage.mean(dim=1, keepdims=True)
+        # advantage = advantage * self.progression
         ratio = torch.exp(log_p-log_p_old) # (batch, node)
         ratio_clipped = torch.clamp(ratio, 1-self.epsilon, 1+self.epsilon)
         loss_policy1 = advantage * ratio

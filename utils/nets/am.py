@@ -48,7 +48,7 @@ class AM(nn.Module):
         if temp is not None:  # Do not change temperature if not provided
             self.temp = temp
 
-    def forward(self, input, tour_to_be_evaluated=None):
+    def forward(self, input_original, tour_to_be_evaluated=None):
         '''
         input: (batch, node, 2)
         output: 
@@ -56,12 +56,65 @@ class AM(nn.Module):
             log_p_total: (batch, node)
             value: (batch, node)
         '''
-        points_embedded = self.initial_embedder(input)
-        embeddings, _ = self.encoder(points_embedded)
+        points_embedded = self.initial_embedder(input_original)
+        batch_size, n_nodes, _ = input_original.shape
+        node_indices = torch.arange(n_nodes).unsqueeze(0).repeat(batch_size, 1).cuda()
+        
+        log_ps = []
+        instant_rewards = []
+        values = []
+        tours = []
 
-        output_decoder = self.decoder(input, embeddings, tour_to_be_evaluated)
-        log_p, instant_reward, value, cost, reward_final, tour = output_decoder
-        return log_p, instant_reward, value, cost, reward_final, tour
+
+        batch_id = torch.arange(batch_size).cuda()
+        input = input_original
+        points_embedded_available = points_embedded
+
+        for i in range(n_nodes):
+            state = TSP.make_state(input)
+
+            print(i, points_embedded_available.shape)
+            embeddings, _ = self.encoder(points_embedded_available)
+            graph_embedding, key_glimpse, val_glimpse, logit_key = self._precompute(embeddings)
+
+            first_and_last = self._get_parallel_step_context(embeddings, state)
+            log_p, mask = self._get_log_p(first_and_last, graph_embedding, key_glimpse, 
+                                          val_glimpse, logit_key, state)
+            if tour_to_be_evaluated is None:
+                selected = self._select_node(log_p.exp()[:, 0, :], mask[:, 0, :])
+            else:
+                selected = tour_to_be_evaluated[:, i]
+            log_p_selected = log_p.squeeze()[batch_id, selected]
+            mask = mask.transpose(1, 2)
+            available = embeddings[~mask.expand_as(embeddings)].view(batch_size, n_nodes-i, -1) # (batch, node-i_step, emb)
+            value = self.critic(available, first_and_last) # (batch)
+            
+            if i==0:
+                instant_reward = torch.zeros_like(value).detach()
+            if 0<i:
+                instant_reward = -self.calc_distance(input, selected, previous)
+            instant_rewards.append(instant_reward)
+
+            values.append(value)
+            log_ps.append(log_p_selected)
+            selected_original = node_indices[batch_id, selected]
+            input = input[~mask.expand_as(input)].view(batch_size, n_nodes-i, -1)
+            node_indices = node_indices[~mask.expand_as(node_indices)].view(batch_size, n_nodes-i, -1)
+            points_embedded_available = points_embedded_available[~mask.expand_as(embeddings)].view(batch_size, n_nodes-i, -1)
+            print(f'{selected_original.shape=}, {input.shape=}, {node_indices.shape=}, {points_embedded_available.shape=}')
+            previous = selected
+            tours.append(selected_original)
+
+            i += 1
+
+        reward_final = -self.calc_distance(input, selected, tours[0])
+        log_ps = torch.stack(log_ps, 1)
+        instant_rewards = torch.stack(instant_rewards, 1) # (batch, node)
+        tours = torch.stack(tours, 1)
+        cost, mask = TSP.get_costs(input, tours)
+        values = torch.stack(values, 1)
+        assert False
+        return log_p, instant_reward, value, cost, reward_final, tours
 
 
     def _calc_log_likelihood(self, log_p, tour):
@@ -80,55 +133,6 @@ class AM(nn.Module):
         distances = dif2.sum(dim=1).sqrt() # (batch)
         return distances
 
-
-    def decoder(self, input, embeddings, tour_to_be_evaluated=None):
-
-        log_ps = []
-        instant_rewards = []
-        values = []
-        tours = []
-
-        state = TSP.make_state(input)
-
-        graph_embedding, key_glimpse, val_glimpse, logit_key = self._precompute(embeddings)
-
-        i = 0
-        batch_size, n_node, _ = input.shape
-        batch_id = torch.arange(batch_size)
-
-        while not state.all_finished():
-            first_and_last = self._get_parallel_step_context(embeddings, state)
-            log_p, mask = self._get_log_p(first_and_last, graph_embedding, key_glimpse, 
-                                          val_glimpse, logit_key, state)
-            if tour_to_be_evaluated is None:
-                selected = self._select_node(log_p.exp()[:, 0, :], mask[:, 0, :])
-            else:
-                selected = tour_to_be_evaluated[:, i]
-            log_p_selected = log_p.squeeze()[batch_id, selected]
-            mask = mask.transpose(1, 2).expand_as(embeddings)
-            available = embeddings[~mask].view(batch_size, n_node-i, -1) # (batch, node-i_step, emb)
-            value = self.critic(available, first_and_last) # (batch)
-            if i==0:
-                instant_reward = torch.zeros_like(value).detach()
-            if 0<i:
-                instant_reward = -self.calc_distance(input, selected, previous)
-            instant_rewards.append(instant_reward)
-
-            values.append(value)
-            log_ps.append(log_p_selected)
-            previous = selected
-            tours.append(selected)
-
-            state = state.update(selected)
-            i += 1
-
-        reward_final = -self.calc_distance(input, selected, tours[0])
-        log_ps = torch.stack(log_ps, 1)
-        instant_rewards = torch.stack(instant_rewards, 1) # (batch, node)
-        tours = torch.stack(tours, 1)
-        cost, mask = TSP.get_costs(input, tours)
-        values = torch.stack(values, 1)
-        return log_ps, instant_rewards, values, cost, reward_final, tours
 
 
 

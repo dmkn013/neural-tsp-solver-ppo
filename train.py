@@ -11,7 +11,8 @@ from config import parse
 
 
 def run_training():
-    
+    print(torch.cuda.is_available())
+    return
     cfg = parse()
     torch.manual_seed(cfg.seed)
     model = AM(cfg).cuda()
