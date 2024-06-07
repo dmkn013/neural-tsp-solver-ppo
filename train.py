@@ -10,12 +10,13 @@ from utils.problems.problem_tsp import TSPDataset
 from config import parse
 
 
-def run_training():
-    print(torch.cuda.is_available())
-    return
+def run_training():        
+    
     cfg = parse()
     torch.manual_seed(cfg.seed)
-    model = AM(cfg).cuda()
+    model = AM(cfg)
+    if torch.cuda.is_available():
+        model = model.cuda()
     optimizer = optim.Adam(params=model.parameters(), lr=cfg.lr)
 
     train_dataset = TSPDataset(size=cfg.n_nodes, num_samples=cfg.epoch_size)

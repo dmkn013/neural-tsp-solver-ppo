@@ -47,7 +47,22 @@ class AM(nn.Module):
         self.decode_type = decode_type
         if temp is not None:  # Do not change temperature if not provided
             self.temp = temp
-
+            
+    def global2local(self, tour_to_be_evaluated):
+        batch_size, n_nodes = tour_to_be_evaluated.shape
+        local = torch.zeros_like(tour_to_be_evaluated)
+        
+        for i_step in range(n_nodes):
+            for i_batch in range(batch_size):
+                index_global = tour_to_be_evaluated[i_batch, i_step]
+                index_past = tour_to_be_evaluated[i_batch, :i_step]
+                smaller = (index_past<index_global).sum()
+                index_local = index_global - smaller
+                local[i_batch, i_step] = index_local
+                
+        return local
+        
+        
     def forward(self, input_original, tour_to_be_evaluated=None):
         '''
         input: (batch, node, 2)
@@ -58,7 +73,11 @@ class AM(nn.Module):
         '''
         points_embedded = self.initial_embedder(input_original)
         batch_size, n_nodes, _ = input_original.shape
-        node_indices = torch.arange(n_nodes).unsqueeze(0).repeat(batch_size, 1).cuda()
+        node_indices = torch.arange(n_nodes).unsqueeze(0).repeat(batch_size, 1) # (batch, node)
+        if torch.cuda.is_available():
+            node_indices = node_indices.cuda()
+        if tour_to_be_evaluated is not None:
+            tour_to_be_evaluated = self.global2local(tour_to_be_evaluated)
         
         log_ps = []
         instant_rewards = []
@@ -66,89 +85,82 @@ class AM(nn.Module):
         tours = []
 
 
-        batch_id = torch.arange(batch_size).cuda()
+        batch_id = torch.arange(batch_size)
+        if torch.cuda.is_available():
+            batch_id = batch_id.cuda()
         input = input_original
         points_embedded_available = points_embedded
 
         for i in range(n_nodes):
             state = TSP.make_state(input)
 
-            print(i, points_embedded_available.shape)
             embeddings, _ = self.encoder(points_embedded_available)
             graph_embedding, key_glimpse, val_glimpse, logit_key = self._precompute(embeddings)
 
             first_and_last = self._get_parallel_step_context(embeddings, state)
-            log_p, mask = self._get_log_p(first_and_last, graph_embedding, key_glimpse, 
-                                          val_glimpse, logit_key, state)
+            log_p = self._get_log_p(first_and_last, graph_embedding, key_glimpse, 
+                                    val_glimpse, logit_key, state)[0]
             if tour_to_be_evaluated is None:
-                selected = self._select_node(log_p.exp()[:, 0, :], mask[:, 0, :])
+                selected = self._select_node(log_p.exp()[:, 0, :])
             else:
                 selected = tour_to_be_evaluated[:, i]
-            log_p_selected = log_p.squeeze()[batch_id, selected]
-            mask = mask.transpose(1, 2)
-            available = embeddings[~mask.expand_as(embeddings)].view(batch_size, n_nodes-i, -1) # (batch, node-i_step, emb)
-            value = self.critic(available, first_and_last) # (batch)
+            mask = torch.zeros(batch_size, n_nodes-i).to(bool) # (batch, node)
+            mask[batch_id, selected] = True
+            current = input[batch_id, selected]
+            if i==0:
+                first = current
+            log_p_selected = log_p.squeeze(1)[batch_id, selected]
+            value = self.critic(embeddings, first_and_last) # (batch)
             
             if i==0:
                 instant_reward = torch.zeros_like(value).detach()
             if 0<i:
-                instant_reward = -self.calc_distance(input, selected, previous)
+                instant_reward = -self.calc_distance(current, previous)
+                    
             instant_rewards.append(instant_reward)
 
             values.append(value)
             log_ps.append(log_p_selected)
             selected_original = node_indices[batch_id, selected]
-            input = input[~mask.expand_as(input)].view(batch_size, n_nodes-i, -1)
-            node_indices = node_indices[~mask.expand_as(node_indices)].view(batch_size, n_nodes-i, -1)
-            points_embedded_available = points_embedded_available[~mask.expand_as(embeddings)].view(batch_size, n_nodes-i, -1)
-            print(f'{selected_original.shape=}, {input.shape=}, {node_indices.shape=}, {points_embedded_available.shape=}')
-            previous = selected
+            input = input[~mask.unsqueeze(-1).repeat(1, 1, 2)].view(batch_size, n_nodes-i-1, 2)
+            node_indices = node_indices[~mask].view(batch_size, n_nodes-i-1)
+            if i<n_nodes-1:
+                points_embedded_available = points_embedded_available[~mask.unsqueeze(-1).repeat(1, 1, self.embedding_dim)].view(batch_size, n_nodes-i-1, -1)
+            previous = current
             tours.append(selected_original)
 
             i += 1
 
-        reward_final = -self.calc_distance(input, selected, tours[0])
+        reward_final = -self.calc_distance(first, current)
         log_ps = torch.stack(log_ps, 1)
         instant_rewards = torch.stack(instant_rewards, 1) # (batch, node)
         tours = torch.stack(tours, 1)
-        cost, mask = TSP.get_costs(input, tours)
+        cost, mask = TSP.get_costs(input_original, tours)
         values = torch.stack(values, 1)
-        assert False
-        return log_p, instant_reward, value, cost, reward_final, tours
+        return log_ps, instant_rewards, values, cost, reward_final, tours
 
 
     def _calc_log_likelihood(self, log_p, tour):
-
         log_p = log_p.gather(2, tour.unsqueeze(-1)).squeeze(-1) # (batch*sample, node)
         log_p_total = log_p.sum(1) # (batch*sample)
         return log_p_total
 
 
-    def calc_distance(self, points, current, previous):
-        batch_id = torch.arange(points.size(0))
-        point_current = points[batch_id, current]
-        point_previous = points[batch_id, previous]
-        dif = point_current - point_previous
+    def calc_distance(self, current, previous):
+        dif = current - previous
         dif2 = dif.pow(2)
-        distances = dif2.sum(dim=1).sqrt() # (batch)
-        return distances
+        distance = dif2.sum(dim=1).sqrt() # (batch)
+        return distance
 
 
 
-
-    def _select_node(self, probs, mask):
+    def _select_node(self, probs):
 
         if self.decode_type == "greedy":
             _, selected = probs.max(1)
-            assert not mask.gather(1, selected.unsqueeze(
-                -1)).data.any(), "Decode greedy: infeasible action has maximum probability"
 
         elif self.decode_type == "sampling":
             selected = probs.multinomial(1).squeeze(1)
-
-            while mask.gather(1, selected.unsqueeze(-1)).data.any():
-                print('Sampled bad values, resampling!')
-                selected = probs.multinomial(1).squeeze(1)
         else:
             raise NotImplementedError
         return selected
