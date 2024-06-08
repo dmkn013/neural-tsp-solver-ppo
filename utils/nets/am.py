@@ -71,6 +71,7 @@ class AM(nn.Module):
             log_p_total: (batch, node)
             value: (batch, node)
         '''
+
         points_embedded = self.initial_embedder(input_original)
         batch_size, n_nodes, _ = input_original.shape
         node_indices = torch.arange(n_nodes).unsqueeze(0).repeat(batch_size, 1) # (batch, node)
@@ -89,17 +90,19 @@ class AM(nn.Module):
         if torch.cuda.is_available():
             batch_id = batch_id.cuda()
         input = input_original
-        points_embedded_available = points_embedded
+        encoder_input = points_embedded
 
         for i in range(n_nodes):
-            state = TSP.make_state(input)
 
-            embeddings, _ = self.encoder(points_embedded_available)
-            graph_embedding, key_glimpse, val_glimpse, logit_key = self._precompute(embeddings)
-
-            first_and_last = self._get_parallel_step_context(embeddings, state)
+            embeddings_fla, _ = self.encoder(encoder_input)
+            graph_embedding, key_glimpse, val_glimpse, logit_key = self._precompute(i, embeddings_fla)
+            if i!=0:
+                embeddings_a = embeddings_fla[:, 2:]
+            else:
+                embeddings_a = embeddings_fla
+            first_and_last = self._get_parallel_step_context(i, embeddings_fla)
             log_p = self._get_log_p(first_and_last, graph_embedding, key_glimpse, 
-                                    val_glimpse, logit_key, state)[0]
+                                        val_glimpse, logit_key)
             if tour_to_be_evaluated is None:
                 selected = self._select_node(log_p.exp()[:, 0, :])
             else:
@@ -109,8 +112,9 @@ class AM(nn.Module):
             current = input[batch_id, selected]
             if i==0:
                 first = current
+                first_embed = encoder_input[batch_id, selected]
             log_p_selected = log_p.squeeze(1)[batch_id, selected]
-            value = self.critic(embeddings, first_and_last) # (batch)
+            value = self.critic(embeddings_a, first_and_last) # (batch)
             
             if i==0:
                 instant_reward = torch.zeros_like(value).detach()
@@ -118,15 +122,21 @@ class AM(nn.Module):
                 instant_reward = -self.calc_distance(current, previous)
                     
             instant_rewards.append(instant_reward)
-
             values.append(value)
             log_ps.append(log_p_selected)
             selected_original = node_indices[batch_id, selected]
             input = input[~mask.unsqueeze(-1).repeat(1, 1, 2)].view(batch_size, n_nodes-i-1, 2)
             node_indices = node_indices[~mask].view(batch_size, n_nodes-i-1)
-            if i<n_nodes-1:
-                points_embedded_available = points_embedded_available[~mask.unsqueeze(-1).repeat(1, 1, self.embedding_dim)].view(batch_size, n_nodes-i-1, -1)
             previous = current
+            if i==0:
+                previous_embed = encoder_input[batch_id, selected]
+            else:
+                previous_embed = encoder_input[batch_id, selected+2]
+            if i!=0:
+                encoder_input = encoder_input[:, 2:]
+            if i<n_nodes-1:
+                encoder_input = encoder_input[~mask.unsqueeze(-1).repeat(1, 1, self.embedding_dim)].view(batch_size, n_nodes-i-1, -1)
+                encoder_input = torch.cat([first_embed.unsqueeze(1), previous_embed.unsqueeze(1), encoder_input], dim=1)
             tours.append(selected_original)
 
             i += 1
@@ -165,7 +175,7 @@ class AM(nn.Module):
             raise NotImplementedError
         return selected
 
-    def _precompute(self, embeddings):
+    def _precompute(self, i, embeddings):
 
         # The fixed context projection of the graph embedding is calculated only once for efficiency
         graph_embed = embeddings.mean(1)
@@ -173,6 +183,8 @@ class AM(nn.Module):
         graph_embedding = self.project_fixed_context(graph_embed)[:, None, :]
 
         # The projection of the node embeddings for the attention is calculated once up front
+        if i!=0:
+            embeddings = embeddings[:, 2:]
         glimpse_key_fixed, glimpse_val_fixed, logit_key_fixed = \
             self.project_node_embeddings(embeddings[:, None, :, :]).chunk(3, dim=-1)
 
@@ -184,50 +196,39 @@ class AM(nn.Module):
 
 
     def _get_log_p(self, first_and_last, graph_embedding, 
-                   key_glimpse, val_glimpse, logit_key, state):
+                   key_glimpse, val_glimpse, logit_key):
         
-        # Compute query = context node embedding
         query = graph_embedding + self.project_step_context(first_and_last)
 
-        # Compute keys and values for the nodes
         glimpse_K, glimpse_V, logit_K = key_glimpse, val_glimpse, logit_key
 
-        # Compute the mask
-        mask = state.get_mask()
-
-        # Compute logits (unnormalized log_p)
-        log_p, glimpse = self._one_to_many_logits(query, glimpse_K, glimpse_V,
-                                                logit_K, mask)
+        log_p, glimpse = self._one_to_many_logits(query, glimpse_K, glimpse_V, logit_K)
 
         log_p = torch.log_softmax(log_p / self.temp, dim=-1)
         assert not torch.isnan(log_p).any()
 
-        return log_p, mask
+        return log_p
 
-    def _get_parallel_step_context(self, embeddings, state):
-
-        current_node = state.get_current_node()
-        batch_size = current_node.size(0)
-        
-        if state.i.item() == 0:
+    def _get_parallel_step_context(self, i, embeddings):
+        batch_size = embeddings.size(0)
+        if i==0:
             return self.W_placeholder[None, None, :].expand(batch_size, 1, 
                                                             self.W_placeholder.size(-1))
-
-        index_first_last = torch.cat((state.first_a, current_node), 1)[:, :, None]
-        index_first_last = index_first_last.expand(batch_size, 2, embeddings.size(-1))
-        first_last = embeddings.gather(1, index_first_last)
+        first_last = embeddings[:, :2]
         first_last = first_last.view(batch_size, 1, -1)
         return first_last
 
 
-    def _one_to_many_logits(self, query, glimpse_K, glimpse_V, logit_K, mask):
+    def _one_to_many_logits(self, query, glimpse_K, glimpse_V, logit_K):
 
         batch_size, num_steps, embed_dim = query.size()
         key_size = val_size = embed_dim // self.n_heads
 
         glimpse_Q = query.view(batch_size, num_steps, self.n_heads, 1, key_size).permute(2, 0, 1, 3, 4)
         query_attention = torch.matmul(glimpse_Q, glimpse_K.transpose(-2, -1))
+        assert not torch.isnan(glimpse_Q).any()
         compatibility =  query_attention / math.sqrt(glimpse_Q.size(-1))
+        assert not torch.isnan(compatibility).any()
 
         heads = torch.matmul(torch.softmax(compatibility, dim=-1), glimpse_V)
 
@@ -238,7 +239,6 @@ class AM(nn.Module):
         logits = torch.matmul(final_Q, logit_K.transpose(-2, -1)).squeeze(-2) / math.sqrt(final_Q.size(-1))
 
         logits = torch.tanh(logits) * self.tanh_clipping
-        logits[mask] = -math.inf
 
         return logits, glimpse.squeeze(-2)
 

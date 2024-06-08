@@ -123,8 +123,8 @@ class Trainer():
     def train_batch(self, batch):
         log_p, reward, value, cost, reward_final, tour = self.model(batch)
         with torch.no_grad():
-            out_old = self.model_old(batch, tour)
-        log_p_old, tour_recon = out_old[0], out_old[-1]
+            log_p_old = self.model_old(batch, tour)[0]
+
         advantage, value_tgt = self.calc_advantage(reward, value, reward_final) # (batch, node)
         advantage = advantage - advantage.mean(dim=1, keepdims=True)
         ratio = torch.exp(log_p-log_p_old) # (batch, node)
