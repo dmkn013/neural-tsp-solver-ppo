@@ -10,7 +10,7 @@ from utils.problems.problem_tsp import TSPDataset
 from config import parse
 
 
-def run_training():        
+def run_training():
     
     cfg = parse()
     torch.manual_seed(cfg.seed)
@@ -21,7 +21,7 @@ def run_training():
 
     train_dataset = TSPDataset(size=cfg.n_nodes, num_samples=cfg.epoch_size)
     train_loader = DataLoader(dataset=train_dataset, batch_size=cfg.batch_size, shuffle=True,
-                              num_workers=os.cpu_count())
+                              num_workers=os.cpu_count()*0)
 
     filename = '20240605.pkl'
     path2file = os.path.join('dataset', f'tsp_{cfg.n_nodes}', filename)
@@ -30,7 +30,7 @@ def run_training():
     val_loader = DataLoader(dataset=val_dataset, batch_size=cfg.batch_size, shuffle=False,
                             num_workers=os.cpu_count())
 
-
+        
     trainer = Trainer(model, train_loader, val_loader, optimizer, cfg)
     trainer.fit(cfg.n_epochs)
 

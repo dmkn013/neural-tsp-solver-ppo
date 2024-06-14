@@ -28,8 +28,6 @@ def parse():
   parser.add_argument('--hidden_dim', default=512, type=int)
   parser.add_argument('--embedding_dim', default=128, type=int)
   parser.add_argument('--n_layers_encoder', type=int, default=2)
-  parser.add_argument('--n_layers_decoder', default=2, type=int)
-  parser.add_argument('--dropout', default=0.1, type=float)
   parser.add_argument('--normalization', default='batch')
   parser.add_argument('--tanh_clipping', default=10, type=float)
 

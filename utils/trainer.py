@@ -2,10 +2,12 @@
 import os
 import time
 import copy
+import json
 
 import glob
 import numpy as np
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 import torch
 from torch import nn
 import torch.optim as optim
@@ -17,6 +19,9 @@ class Trainer():
         self.save_dir = os.path.join(cfg.save_dir, f'tsp_{cfg.n_nodes}', cfg.run_name)
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
+        cfg_dict = vars(cfg)
+        with open(os.path.join(self.save_dir, 'args.json'), 'w') as json_file:
+            json.dump(cfg_dict, json_file, indent=4)
 
         if cfg.resume:
             checkpoints = glob.glob(os.path.join(self.save_dir, '*.pt'))
@@ -61,6 +66,9 @@ class Trainer():
                     os.remove(path2model)
                 path2model = os.path.join(self.save_dir, filename_model)
                 torch.save({'model': model_to_save.state_dict()}, path2model)
+            else:
+                os.remove(os.path.join(self.save_dir, f'val-epoch-{self.epoch}.png'))
+
 
             with open(self.log_csv, 'a') as f:
                 f.write(f'{result_str}\n')
@@ -103,16 +111,23 @@ class Trainer():
         input:
             reward: (batch, node)
             value: (batch, node)
+            reward_final: (batch)
         output:
             advantage: (batch, node)
         '''
-        n_node = reward.size(1)
+        reward_final = reward_final * 100
+        batch_size, n_node = reward.shape
         value_tgt = torch.zeros_like(reward)
         advantage = torch.zeros_like(reward)
-        i_step = 0
+        gamma = 0.9
 
         for i_step in range(n_node):
-            value_tgt_step = reward[:, i_step:].sum(1) + reward_final
+#            value_tgt_step = reward[:, i_step:].sum(1) + reward_final
+            progression = torch.vander(torch.tensor([gamma]), N=n_node-i_step, increasing=True).cuda()
+            progression = progression.repeat(batch_size, 1)
+            
+            reward_weighted = (reward[:, i_step:] * progression).sum(1)
+            value_tgt_step = reward_weighted + reward_final * pow(gamma, n_node-i_step)
             a = -value[:, i_step] + value_tgt_step
             advantage[:, i_step] = a
             value_tgt[:, i_step] = value_tgt_step
@@ -122,11 +137,13 @@ class Trainer():
 
     def train_batch(self, batch):
         log_p, reward, value, cost, reward_final, tour = self.model(batch)
+        
         with torch.no_grad():
             log_p_old = self.model_old(batch, tour)[0]
 
         advantage, value_tgt = self.calc_advantage(reward, value, reward_final) # (batch, node)
         advantage = advantage - advantage.mean(dim=1, keepdims=True)
+        
         ratio = torch.exp(log_p-log_p_old) # (batch, node)
         ratio_clipped = torch.clamp(ratio, 1-self.epsilon, 1+self.epsilon)
         loss_policy1 = advantage * ratio
@@ -151,6 +168,7 @@ class Trainer():
                 batch = batch.cuda()
             with torch.no_grad():
                 log_p, reward, value, cost, reward_final, tour = self.model(batch)
+            self.save_image(batch, tour, i_batch)
             costs.append(cost.mean().item())
 
         cost_mean = np.mean(costs)
@@ -158,6 +176,19 @@ class Trainer():
         print(f'{self.epoch}-th epoch: {cost_mean=}')
 
         return {'cost': cost_mean, 'time': duration}
+    
+    def save_image(self, points_batch, tours, i_batch):
+        if i_batch!=0:
+            return
+        points = points_batch[0]
+        tour = tours[0]
+        sorted = points[tour].cpu().numpy()
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.plot(sorted[:, 0], sorted[:, 1], c='k', marker='o')
+        ax.scatter(sorted[0, 0], sorted[0, 1], c='r')
+        fig.savefig(os.path.join(self.save_dir, f'val-epoch-{self.epoch}.png'))
+        plt.close()
+
 
 
 
