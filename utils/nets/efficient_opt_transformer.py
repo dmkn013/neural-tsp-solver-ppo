@@ -29,10 +29,10 @@ class AttentionModelFixed(NamedTuple):
         )
 
 
-class AM2(nn.Module):
+class EfficientOptTransformer(nn.Module):
 
     def __init__(self, cfg):
-        super(AM2, self).__init__()
+        super(EfficientOptTransformer, self).__init__()
 
         self.embedding_dim = cfg.embedding_dim
         self.hidden_dim = cfg.hidden_dim
@@ -83,9 +83,22 @@ class AM2(nn.Module):
 
         embeddings_all, _ = self.encoder(points_embedded)
         embeddings_all = embeddings_all.repeat(n_rollout, 1, 1)
+        
+        log_p_total, tours = self.decoder(embeddings_all)
+        
+        input_repeated = input_original.repeat(n_rollout, 1, 1)
+        cost = TSP.get_costs(input_repeated, tours.to(torch.int64))
+
+        return cost, log_p_total, tours
+
+
+    def decoder(self, embeddings_all):
         batch_size, n_nodes, _ = embeddings_all.shape
         batch_id = torch.arange(batch_size).cuda()
-        
+
+        batch_size, n_nodes, _ = embeddings_all.shape
+        batch_id = torch.arange(batch_size).cuda()
+
         log_p_total = []
         tours = []
         node_indices = torch.arange(n_nodes).unsqueeze(0).repeat(batch_size, 1).cuda() # (batch, node)
@@ -95,34 +108,28 @@ class AM2(nn.Module):
         embed_f = embed_l = embeddings_all[:, 0]
 
         for i in range(n_nodes-1):
-
-            graph_embedding, key_glimpse, val_glimpse, logit_key = self.precompute(embed_a, embed_f, embed_l)
+            graph_embedding, key_glimpse, val_glimpse, logit_key = self.precompute(embed_a)
             first_and_last = self.get_parallel_step_context(embed_f, embed_l)
-            log_p_all = self.get_log_p(first_and_last, graph_embedding, key_glimpse, val_glimpse, logit_key)
-            selected = self.select_node(log_p_all.exp()[:, 0, :])
+            log_ps = self.get_log_p(first_and_last, graph_embedding, key_glimpse, val_glimpse, logit_key)
+            selected = self.select_node(log_ps.exp()[:, 0, :])
             mask = torch.zeros(batch_size, n_nodes-i-1).to(bool).cuda() # (batch, node)
             mask[batch_id, selected] = True
-            log_p_selected = log_p_all.squeeze(1)[batch_id, selected]
+            log_p_selected = log_ps.squeeze(1)[batch_id, selected]
             
-            log_p_total.append(log_p_selected)
             selected_original = node_indices[batch_id, selected]
-            node_indices = node_indices[~mask].view(batch_size, n_nodes-i-2)
             tours.append(selected_original)
+            log_p_total.append(log_p_selected)
             embed_l = embed_a[batch_id, selected]
+            node_indices = node_indices[~mask].view(batch_size, n_nodes-i-2)
             embed_a = embed_a[~mask.unsqueeze(-1).repeat(1, 1, self.embedding_dim)]
             embed_a = embed_a.view(batch_size, n_nodes-i-2, self.embedding_dim)
-
-            i += 1
 
         log_p_total = torch.stack(log_p_total, 1) # (batch, node-1)
         tours = torch.stack(tours, 1)
         
-        input_repeated = input_original.repeat(n_rollout, 1, 1)
-        cost = TSP.get_costs(input_repeated, tours.to(torch.int64))
         log_p_total = log_p_total.sum(1)
         
-        return cost, log_p_total, tours
-
+        return log_p_total, tours
 
 
 
@@ -140,9 +147,9 @@ class AM2(nn.Module):
             assert False, "Unknown decode type"
         return selected
 
-    def precompute(self, embed_a, embed_f, embed_l):
+    def precompute(self, embed_a):
         num_steps = 1
-        graph_embed = torch.cat([embed_a, embed_f.unsqueeze(1), embed_l.unsqueeze(1)], 1).mean(1)
+        graph_embed = embed_a.mean(1)
         graph_embed = self.project_fixed_context(graph_embed)[:, None, :]
         key_glimpse, val_glimpse, logit_key = self.project_node_embeddings(embed_a[:, None, :, :]).chunk(3, dim=-1)
         
@@ -155,10 +162,24 @@ class AM2(nn.Module):
 
     def get_log_p(self, first_and_last, graph_embedding, key_glimpse, val_glimpse, logit_key):
         query = graph_embedding + first_and_last.unsqueeze(1)
-        
-        log_p = self.one_to_many_logits(query, key_glimpse, val_glimpse, logit_key)
+        batch_size, num_steps, embed_dim = query.size()
+        key_size = val_size = embed_dim // self.n_heads
 
-        log_p = torch.log_softmax(log_p / self.temp, dim=-1)
+        glimpse_Q = query.view(batch_size, num_steps, self.n_heads, 1, key_size).permute(2, 0, 1, 3, 4)
+
+        compatibility = torch.matmul(glimpse_Q, key_glimpse.transpose(-2, -1)) / math.sqrt(glimpse_Q.size(-1))
+
+        heads = torch.matmul(torch.softmax(compatibility, dim=-1), val_glimpse)
+
+        glimpse = self.project_out(
+            heads.permute(1, 2, 3, 0, 4).contiguous().view(-1, num_steps, 1, self.n_heads * val_size))
+
+        final_Q = glimpse
+        logits = torch.matmul(final_Q, logit_key.transpose(-2, -1)).squeeze(-2) / math.sqrt(final_Q.size(-1))
+
+        log_p_unnormalized = torch.tanh(logits) * self.tanh_clipping
+
+        log_p = torch.log_softmax(log_p_unnormalized / self.temp, dim=-1)
 
         assert not torch.isnan(log_p).any()
 
@@ -178,32 +199,6 @@ class AM2(nn.Module):
         embed_fl = self.project_step_context(first_last)
         return embed_fl
 
-
-
-    def one_to_many_logits(self, query, glimpse_K, glimpse_V, logit_K):
-
-        batch_size, num_steps, embed_dim = query.size()
-        key_size = val_size = embed_dim // self.n_heads
-
-        # Compute the glimpse, rearrange dimensions so the dimensions are (n_heads, batch_size, num_steps, 1, key_size)
-        glimpse_Q = query.view(batch_size, num_steps, self.n_heads, 1, key_size).permute(2, 0, 1, 3, 4)
-
-        # Batch matrix multiplication to compute compatibilities (n_heads, batch_size, num_steps, graph_size)
-        compatibility = torch.matmul(glimpse_Q, glimpse_K.transpose(-2, -1)) / math.sqrt(glimpse_Q.size(-1))
-
-        # Batch matrix multiplication to compute heads (n_heads, batch_size, num_steps, val_size)
-        heads = torch.matmul(torch.softmax(compatibility, dim=-1), glimpse_V)
-
-        # Project to get glimpse/updated context node embedding (batch_size, num_steps, embedding_dim)
-        glimpse = self.project_out(
-            heads.permute(1, 2, 3, 0, 4).contiguous().view(-1, num_steps, 1, self.n_heads * val_size))
-
-        final_Q = glimpse
-        logits = torch.matmul(final_Q, logit_K.transpose(-2, -1)).squeeze(-2) / math.sqrt(final_Q.size(-1))
-
-        logits = torch.tanh(logits) * self.tanh_clipping
-
-        return logits
 
 
     def make_heads(self, v, num_steps=None):

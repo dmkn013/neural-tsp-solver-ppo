@@ -4,12 +4,8 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from utils.trainer_ppo import PPOTrainer
-from utils.trainer_dpo import DPOTrainer
 from utils.trainer_reinforce import REINFORCETrainer
-#from utils.nets.am import AM
-from utils.nets.am_original import AM
-from utils.nets.am2 import AM2
+from utils.nets.efficient_opt_transformer import EfficientOptTransformer
 
 from utils.problems.problem_tsp import TSPDataset
 from config import parse
@@ -19,7 +15,7 @@ def run_training():
     
     cfg = parse()
     torch.manual_seed(cfg.seed)
-    model = AM2(cfg).cuda()
+    model = EfficientOptTransformer(cfg).cuda()
 
     filename = '20240605.pkl'
     path2file = os.path.join('dataset', f'tsp_{cfg.n_nodes}', filename)

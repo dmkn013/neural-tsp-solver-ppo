@@ -113,10 +113,6 @@ class REINFORCETrainer():
 
         cost, log_p, tour = self.model(batch, n_rollout=self.n_rollout)
 
-        # cost = cost.view(batch_size, self.n_rollout)
-        # log_p = log_p.view(batch_size, self.n_rollout)
-        
-        # or
         cost = cost.view(self.n_rollout, batch_size).transpose(0, 1)
         log_p = log_p.view(self.n_rollout, batch_size).transpose(0, 1)
         

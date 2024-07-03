@@ -15,10 +15,8 @@ class TSP(object):
             pi.data.sort(1)[0]
         ).all(), "Invalid tour"
 
-        # Gather dataset in order of tour
         d = dataset.gather(1, pi.unsqueeze(-1).expand_as(dataset))
 
-        # Length is distance (L2-norm of difference) from each next location from its prev and of last from first
         return (d[:, 1:] - d[:, :-1]).norm(p=2, dim=2).sum(1) + (d[:, 0] - d[:, -1]).norm(p=2, dim=1)
 
     @staticmethod
