@@ -146,6 +146,7 @@ class AM(nn.Module):
         instant_rewards = torch.stack(instant_rewards, 1) # (batch, node)
         tours = torch.stack(tours, 1)
         cost, mask = TSP.get_costs(input_original, tours)
+        instant_rewards[:, 0] = -cost / float(n_nodes)
         values = torch.stack(values, 1)
         return log_ps, instant_rewards, values, cost, reward_final, tours
 

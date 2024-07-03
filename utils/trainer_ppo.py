@@ -13,7 +13,7 @@ from torch import nn
 import torch.optim as optim
 
 
-class Trainer():
+class PPOTrainer():
     def __init__(self, model, train_loader, val_loader, optimizer, cfg):
         self.model = model
         self.save_dir = os.path.join(cfg.save_dir, f'tsp_{cfg.n_nodes}', cfg.run_name)
@@ -39,7 +39,7 @@ class Trainer():
         self.model_old = copy.deepcopy(model)
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.epsilon = .1
+        self.epsilon = cfg.epsilon
         self.coef_value = cfg.coef_value
         self.optimizer = optim.Adam(params=model.parameters(), lr=cfg.lr)
         self.cfg = cfg
@@ -115,23 +115,24 @@ class Trainer():
         output:
             advantage: (batch, node)
         '''
-        reward_final = reward_final * 100
+        reward_final = reward_final
         batch_size, n_node = reward.shape
         value_tgt = torch.zeros_like(reward)
         advantage = torch.zeros_like(reward)
-        gamma = 0.9
+        gamma = 1.
 
         for i_step in range(n_node):
 #            value_tgt_step = reward[:, i_step:].sum(1) + reward_final
             progression = torch.vander(torch.tensor([gamma]), N=n_node-i_step, increasing=True).cuda()
             progression = progression.repeat(batch_size, 1)
             
-            reward_weighted = (reward[:, i_step:] * progression).sum(1)
+            reward_weighted = (reward[:, i_step:] * progression).sum(1) # (batch)
             value_tgt_step = reward_weighted + reward_final * pow(gamma, n_node-i_step)
             a = -value[:, i_step] + value_tgt_step
             advantage[:, i_step] = a
             value_tgt[:, i_step] = value_tgt_step
 
+        print(f'{value_tgt[0]=}\n{value[0]=}')
         return advantage, value_tgt
 
 
@@ -142,13 +143,18 @@ class Trainer():
             log_p_old = self.model_old(batch, tour)[0]
 
         advantage, value_tgt = self.calc_advantage(reward, value, reward_final) # (batch, node)
-        advantage = advantage - advantage.mean(dim=1, keepdims=True)
+        advantage = (advantage-advantage.mean(dim=1, keepdims=True)) / advantage.std(dim=1, keepdims=True)
         
         ratio = torch.exp(log_p-log_p_old) # (batch, node)
         ratio_clipped = torch.clamp(ratio, 1-self.epsilon, 1+self.epsilon)
         loss_policy1 = advantage * ratio
         loss_policy2 = advantage * ratio_clipped
         loss_policy = -torch.min(loss_policy1, loss_policy2).mean()
+
+
+#        loss_policy = -(advantage*log_p).mean()
+
+
         mse_value = self.mse(value, value_tgt)
         loss_value = torch.sqrt(mse_value) * self.coef_value
         loss = loss_policy + loss_value
@@ -167,9 +173,13 @@ class Trainer():
             if torch.cuda.is_available():
                 batch = batch.cuda()
             with torch.no_grad():
-                log_p, reward, value, cost, reward_final, tour = self.model(batch)
+                log_p, rewards, value, cost, reward_final, tour = self.model(batch)
             self.save_image(batch, tour, i_batch)
             costs.append(cost.mean().item())
+        
+        if (self.epoch%10)==0:
+            rewards_log = torch.cat([rewards[0], reward_final[0].unsqueeze(-1)]).cpu().numpy()
+            np.savetxt(f'rewards-epoch-{self.epoch}.csv', rewards_log, delimiter=',')
 
         cost_mean = np.mean(costs)
         duration = time.time() - start
@@ -187,7 +197,7 @@ class Trainer():
         ax.plot(sorted[:, 0], sorted[:, 1], c='k', marker='o')
         ax.scatter(sorted[0, 0], sorted[0, 1], c='r')
         fig.savefig(os.path.join(self.save_dir, f'val-epoch-{self.epoch}.png'))
-        plt.close()
+#        plt.close()
 
 
 

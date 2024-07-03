@@ -19,7 +19,7 @@ class TSP(object):
         d = dataset.gather(1, pi.unsqueeze(-1).expand_as(dataset))
 
         # Length is distance (L2-norm of difference) from each next location from its prev and of last from first
-        return (d[:, 1:] - d[:, :-1]).norm(p=2, dim=2).sum(1) + (d[:, 0] - d[:, -1]).norm(p=2, dim=1), None
+        return (d[:, 1:] - d[:, :-1]).norm(p=2, dim=2).sum(1) + (d[:, 0] - d[:, -1]).norm(p=2, dim=1)
 
     @staticmethod
     def make_dataset(*args, **kwargs):
@@ -34,7 +34,7 @@ class TSP(object):
     
 class TSPDataset(Dataset):
     
-    def __init__(self, filename=None, size=50, num_samples=1000000, offset=0, distribution=None):
+    def __init__(self, filename=None, n_nodes=50, n_instances=1000000):
         super(TSPDataset, self).__init__()
 
         self.data_set = []
@@ -43,10 +43,10 @@ class TSPDataset(Dataset):
 
             with open(filename, 'rb') as f:
                 data = pickle.load(f)
-                self.data = [torch.FloatTensor(row) for row in (data[offset:offset+num_samples])]
+                self.data = [torch.FloatTensor(row) for row in (data[:n_instances])]
         else:
             # Sample points randomly in [0, 1] square
-            self.data = [torch.FloatTensor(size, 2).uniform_(0, 1) for i in range(num_samples)]
+            self.data = [torch.FloatTensor(n_nodes, 2).uniform_(0, 1) for i in range(n_instances)]
 
         self.size = len(self.data)
 
