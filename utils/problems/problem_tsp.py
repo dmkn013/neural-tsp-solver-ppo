@@ -32,7 +32,7 @@ class TSP(object):
     
 class TSPDataset(Dataset):
     
-    def __init__(self, filename=None, n_nodes=50, n_instances=1000000):
+    def __init__(self, filename=None, n_nodes=50, n_instances=1000000, prepare_target=False):
         super(TSPDataset, self).__init__()
 
         self.data_set = []
@@ -47,7 +47,16 @@ class TSPDataset(Dataset):
             self.data = [torch.FloatTensor(n_nodes, 2).uniform_(0, 1) for i in range(n_instances)]
 
         self.size = len(self.data)
+        self.prepare_target = prepare_target
+        if prepare_target:
+            self._prepare_target()
 
+
+    
+    def _prepare_target(self):
+        for points in self.data:
+            tour_lkh = 
+    
     def __len__(self):
         return self.size
 

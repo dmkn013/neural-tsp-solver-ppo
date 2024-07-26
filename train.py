@@ -5,6 +5,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from utils.trainer_reinforce import REINFORCETrainer
+from utils.trainer_supervised import SuperVisedTrainer
+
 from utils.nets.efficient_opt_transformer import EfficientOptTransformer
 
 from utils.problems.problem_tsp import TSPDataset
@@ -25,7 +27,7 @@ def run_training():
                             num_workers=os.cpu_count())
 
     optimizer = optim.Adam(params=model.parameters(), lr=cfg.lr)        
-    trainer = REINFORCETrainer(model, val_loader, optimizer, cfg)
+    trainer = SuperVisedTrainer(model, val_loader, optimizer, cfg)
     trainer.fit(cfg.n_epochs)
 
 
